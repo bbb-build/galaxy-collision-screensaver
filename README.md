@@ -1,65 +1,165 @@
-# 銀河衝突スクリーンセーバー（数理の風景 No.11）
+# Galaxy Collision Screensaver
 
-2つの銀河が重力で引き合い、潮汐尾・橋を形成しながら合体するN体シミュレーション。
-1ファイル完結のWebGL2実装（Canvas2Dフォールバックつき）。NASA/Hubble実写
-（M51・アンテナ銀河・ねずみ銀河）を画づくりの規準にしている。
+**Live demo: https://bbb-build.github.io/galaxy-collision-screensaver/**
 
-## ファイル構成
+A real-time N-body simulation of two galaxies colliding and merging, rendered to
+look like NASA/Hubble photography. Ships as a single self-contained HTML file —
+no build step, no dependencies, no server. Open it in a browser and a new,
+randomly generated encounter begins; when the merger remnant settles, the scene
+fades out and another encounter starts. It is designed to run forever as a
+screensaver.
 
-| パス | 内容 |
+Reference imagery used as the visual target: M51 (Whirlpool), NGC 4038/4039
+(Antennae), and NGC 4676 (Mice) — see `verify/ref-*.jpg`.
+
+## Contents
+
+| Path | Description |
 |---|---|
-| `galaxy-collision.html` | 本体。ブラウザで開くだけで動く（1ファイル完結） |
-| `verify/` | 検証ハーネス一式（Node.js、依存は pngjs のみ） |
+| `galaxy-collision.html` | The entire application (WebGL2, Canvas2D fallback) |
+| `index.html` | Redirect to the above, for GitHub Pages |
+| `verify/` | Node.js verification harness (physics regression, soak tests, CPU rendering, in-browser profiling) |
 
-## 物理モデル
+## Physics model
 
-- Toomre & Toomre (1972) 系の制限N体: 2つの核（質点）+ テスト粒子の円盤星 N=60,000
-- 力学的摩擦による軌道減衰で合体まで進行、適応サブステップ（SUBSTEP_SEP=2.4、近接時 h≤0.008-0.012）
-- ガスは1/3解像度バッファ、HII領域（赤）はスターバースト連動、ダストはτ蓄積→現像時に乗算吸収
-- 合体後: 等速→早送り（WARP≤7、物理精度維持）→収束検知（p80半径ゲート）→減速→30秒堪能→fadeout
+The simulation uses the **restricted N-body method** of Toomre & Toomre (1972),
+the classic technique that first reproduced tidal tails and bridges:
 
-## 遭遇パラメータ（毎回ランダム）
+- Each galaxy is a softened point-mass core plus a rotating disk of **60,000
+  test particles** (stars). Cores attract each other and every star; stars are
+  massless and do not attract anything. This is what makes 60k particles
+  tractable in real time on a single thread.
+- Core orbits decay via a **dynamical friction** term (strongest near
+  pericenter, ramping up after `t > 70` as a safety valve), so the galaxies
+  sink together over several passes and merge.
+- Integration uses **adaptive substepping**: a coarse step while the cores are
+  far apart (`separation > 2.4`), refined to `h ≤ 0.004–0.012` during close
+  encounters and fast-forward, keeping pericenter passages accurate.
+- Simulation time advances **proportionally to wall-clock time** (smoothed with
+  an EMA of frame dt), not per-frame — otherwise frame-rate jitter shows up as
+  visible speed jitter in the motion.
 
-リロードごとに以下が乱数で決まり、合体の経過・尾の形・所要時間が毎回変わる:
+Despite the simplification, the model reproduces the signature features of real
+interacting galaxies: long **tidal tails** flung outward and a **bridge** of
+stars connecting the two disks. For the calibration encounter, 40–43% of disk
+stars end up in tails and 20–25% in the bridge (see *Verification* below).
 
-```
-massRatio: 0.3-1.0   質量比
-rp:        0.75-1.9  近点距離（深い直撃〜浅いかすめ）
-e:         0.90-1.0  離心率（ほぼ放物線〜束縛軌道）
-fric:      0.16-0.30 力学的摩擦係数（合体の速さ）
-inc/node:  各銀河の円盤の傾き・昇交点（ランダム）
-spin:      順行60% / 逆行40%
-```
+## Randomized encounters
 
-## 検証ハーネス（verify/）
+Every run draws a new set of encounter parameters, so no two collisions look
+alike:
+
+| Parameter | Range | Effect |
+|---|---|---|
+| `massRatio` | 0.3 – 1.0 | Equal-mass merger vs. minor merger |
+| `rp` (pericenter distance) | 0.75 – 1.9 | Head-on plunge vs. grazing pass |
+| `e` (eccentricity) | 0.90 – 1.0 | Bound orbit vs. near-parabolic flyby |
+| `fric` (friction coefficient) | 0.16 – 0.30 | How quickly the orbit decays |
+| `inc`, `node` per disk | random | Disk orientation — dramatically changes tail shapes |
+| `spin` per disk | 60% prograde / 40% retrograde | Retrograde passes suppress tails |
+
+Star positions and velocities within each disk (spiral-arm placement, bulge,
+velocity dispersion) are also randomized per run.
+
+## Rendering pipeline
+
+A deferred, HDR-ish pipeline tuned against Hubble reference photos:
+
+- **Star/gas split**: only intrinsically bright stars (`propX ≥ 1.0`) are drawn
+  as sharp points; dim stars contribute only to a soft "gas" medium. Drawing
+  every star as a point produces sand-grain noise — the single biggest visual
+  lesson of this project.
+- **Gas buffer at 1/3 resolution** (`GAS_RES = 3`, auto-degrading to 4 under
+  load) with per-channel filmic tone mapping, knee at 0.35 to keep galaxy cores
+  from clipping to white.
+- **Dust lanes**: opacity (τ) is *accumulated* into a buffer and applied as
+  multiplicative absorption `exp(-τ · (0.50, 0.75, 1.05))` at develop time,
+  giving the red-brown dark lanes of real photos. (Subtractive dust simply
+  vanishes inside HDR compression — it must be multiplicative.)
+- **HII regions**: red star-forming knots `(1.0, 0.34, 0.30)` whose intensity
+  scales ×2.2 with the starburst triggered by the collision. Rendered with
+  exactly the same point geometry as white stars.
+- **Depth-of-field portrait effect**: foreground red gas blurs while the
+  galaxies stay in focus — an accident of depth dimming plus the low-resolution
+  gas buffer that proved worth keeping.
+- **Auto quality** (`AUTO_Q`): frame-time hysteresis (24 ms / 12 ms, 300-frame
+  cooldown) switches gas resolution; switching is frozen during fast-forward.
+
+## Post-merger choreography
+
+A merger remnant never "freezes" — physically it oscillates around equilibrium
+(±6%) forever. So the ending is staged:
+
+1. **Turmoil** — the merger proper, at normal speed.
+2. **Fast-forward** — up to ×7 (`WARP`), implemented by taking more physics
+   substeps per frame (`h ≤ 0.012`), so accuracy is preserved; speed changes
+   are exponential ramps only.
+3. **Convergence gate** — the 80th-percentile star radius (computed over ~800
+   strided samples; small samples make quantiles too noisy) must change less
+   than 15% over 12 sim-time units.
+4. **Slow-down and savor** — `SAVOR_S = 30` seconds at normal speed, camera
+   blending gently toward the remnant.
+5. **Fade out**, then a fresh encounter begins. `RELAX_S = 240` s is the hard
+   safety ceiling for the whole phase.
+
+The camera is driven by percentile radii of the star distribution (p80 while
+debris is flying, p55 once settled) with rate limits (zoom ≤ 8%/s) so it never
+lurches.
+
+## Verification harness (`verify/`)
+
+The physics and the look are both guarded by scripts (Node.js; the only
+dependency is `pngjs`):
 
 ```sh
 cd verify && npm install
-node harness.js        # 物理回帰テスト（下記の規準遭遇に対して±1%）
-node soak.js           # 乱数遭遇ソーク（多数の乱数シードで破綻がないか）
-node preview.js        # CPU再現でPNG現像（preview-*.png を生成）
-node browser-check.js  # ヘッドレスEdge CDPで renderer/fps 実測
-node relax-timeline.js # 合体後タイムラインの検証
-node step-cost.js      # step() の実測コスト
+
+node harness.js        # physics regression against the calibration encounter
+node soak.js           # randomized-encounter soak test (no NaNs, no blowups)
+node preview.js        # CPU re-implementation renders PNGs (preview-*.png)
+node browser-check.js  # headless Edge via CDP: real renderer + fps measurement
+node relax-timeline.js # post-merger timeline validation
+node settle-profile.js # remnant settling profile
+node step-cost.js      # measured cost of one physics step
 ```
 
-### 物理回帰の規準遭遇
+### Calibration encounter (regression baseline)
 
-`massRatio=0.7 / rp=1.3 / e=1.0` で:
+For `massRatio = 0.7, rp = 1.3, e = 1.0`, all within ±1%:
 
-- 第一近点 d=1.2929 @ t=5.096
-- 第一遠点 d=4.4708 @ t=16.480
-- 合体 t=36.864（各±1%）
-- 尾メトリクス 40-43% / 橋メトリクス 20-25%（橋は実現値分散σ≈2で上端をまたぐことがある → 再実行で2連続合格を取る運用）
+| Event | Value |
+|---|---|
+| First pericenter | d = 1.2929 at t = 5.096 |
+| First apocenter | d = 4.4708 at t = 16.480 |
+| Merger | t = 36.864 |
+| Tail fraction | 40 – 43% |
+| Bridge fraction | 20 – 25% |
 
-`verify/ref-*.jpg` はHubble実写の参照画像、`verify/preview-*.png` は規準遭遇の現像結果スナップショット。
+Tail/bridge metrics classify disk stars displaced > 1.0 from their own core,
+within the inter-core span. The bridge metric has realization variance σ ≈ 2
+and can straddle the upper bound — the working rule is two consecutive passing
+runs.
 
-## 品質方向性
+`verify/extracted.js` is the simulation core extracted from the HTML so the
+harness can run it under Node; `preview-*.png` are rendered snapshots of the
+calibration encounter at key moments.
 
-到達目標は「NASA撮影の8K超高画質の銀河が実際に動いて衝突しているかのよう」。
+## Performance notes
 
-- 明るい星（propX≥1.0）だけ点描画、暗い星はガス媒質のみ（SPLIT分離）— 全星点描は砂粒ノイズになる
-- 固定で光る背景星は置かない
-- 前景の赤いガス星がボケて銀河にピントが合うポートレート効果（奥行き減光＋ガス低解像度の偶産）は維持する
-- ダストは減算でなくτ蓄積→乗算吸収（減算はHDR圧縮に飲まれて見えない）
-- シミュ前進は実時間比例（フレーム固定だとfps揺れ＝速度揺れになる）、dtはEMAで平滑
+- One physics step costs ~0.76 ms at N = 60,000, so even ×7 fast-forward stays
+  under ~4 ms of physics per frame.
+- The star buffer's full-screen afterglow decay pass was replaced with a plain
+  clear — a large GPU saving at 4K that also sharpened the stars.
+- Per-frame allocations were eliminated (module-scope scratch buffers,
+  `Float32Array` + `TypedArray.sort` for quantiles) to avoid GC micro-pauses.
+- If residual stutter ever returns, the next step is moving physics to a Web
+  Worker.
+
+## Design principles learned along the way
+
+- No fixed twinkling background stars — they distract from the motion.
+- Star points must stay tight; any blur reads as low quality.
+- Pattern variety across mergers matters as much as any single render.
+- "Looks physically plausible" and "looks like a NASA photo" are different
+  targets; the verification harness pins the former so the latter can be
+  iterated freely.
